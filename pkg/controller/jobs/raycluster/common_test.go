@@ -944,7 +944,8 @@ func TestUpdatePodSets(t *testing.T) {
 			wantPodSets: []kueue.PodSet{
 				*utiltestingapi.MakePodSet(headGroupPodSetName, 1).Obj(),
 				*utiltestingapi.MakePodSet("workers", 2).
-					SubGroupCount(new(int32(1))).
+					PodIndexLabel(new(rayutils.RayWorkerReplicaIndexKey)).
+					SubGroupCount(new(int32(2))).
 					Obj(),
 			},
 		},
@@ -1878,6 +1879,63 @@ func TestGetWorkloadslicingCustomAnnotations(t *testing.T) {
 			}
 			if diff := cmp.Diff(tc.wantAnnotation, got); diff != "" {
 				t.Errorf("GetWorkloadslicingCustomAnnotations() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestBuildWorkerTopologyRequest(t *testing.T) {
+	// SubGroupCount must be the same clamped replica count that effectiveWorkerCount uses.
+	testCases := map[string]struct {
+		wgs  rayv1.WorkerGroupSpec
+		want *kueue.PodSetTopologyRequest
+	}{
+		"single-host replicas within bounds": {
+			wgs: rayv1.WorkerGroupSpec{Replicas: new(int32(3)), MinReplicas: new(int32(1)), MaxReplicas: new(int32(5))},
+			want: &kueue.PodSetTopologyRequest{
+				PodIndexLabel: new(rayutils.RayWorkerReplicaIndexKey),
+				SubGroupCount: new(int32(3)),
+			},
+		},
+		"single-host replicas below minimum": {
+			wgs: rayv1.WorkerGroupSpec{Replicas: new(int32(1)), MinReplicas: new(int32(2)), MaxReplicas: new(int32(2))},
+			want: &kueue.PodSetTopologyRequest{
+				PodIndexLabel: new(rayutils.RayWorkerReplicaIndexKey),
+				SubGroupCount: new(int32(2)),
+			},
+		},
+		"multi-host replicas below minimum": {
+			wgs: rayv1.WorkerGroupSpec{Replicas: new(int32(1)), MinReplicas: new(int32(2)), MaxReplicas: new(int32(2)), NumOfHosts: 2},
+			want: &kueue.PodSetTopologyRequest{
+				PodIndexLabel:      new(rayutils.RayHostIndexKey),
+				SubGroupIndexLabel: new(rayutils.RayWorkerReplicaIndexKey),
+				SubGroupCount:      new(int32(2)),
+			},
+		},
+		"multi-host replicas above maximum": {
+			wgs: rayv1.WorkerGroupSpec{Replicas: new(int32(4)), MinReplicas: new(int32(1)), MaxReplicas: new(int32(2)), NumOfHosts: 4},
+			want: &kueue.PodSetTopologyRequest{
+				PodIndexLabel:      new(rayutils.RayHostIndexKey),
+				SubGroupIndexLabel: new(rayutils.RayWorkerReplicaIndexKey),
+				SubGroupCount:      new(int32(2)),
+			},
+		},
+		"absent replicas with minimum": {
+			wgs: rayv1.WorkerGroupSpec{MinReplicas: new(int32(2))},
+			want: &kueue.PodSetTopologyRequest{
+				PodIndexLabel: new(rayutils.RayWorkerReplicaIndexKey),
+				SubGroupCount: new(int32(2)),
+			},
+		},
+	}
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			got, err := buildWorkerTopologyRequest(&tc.wgs)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("unexpected topology request (-want +got):\n%s", diff)
 			}
 		})
 	}

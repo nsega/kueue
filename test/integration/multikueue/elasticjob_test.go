@@ -638,5 +638,58 @@ var _ = ginkgo.Describe("MultiKueue ElasticJob", ginkgo.Label("area:multikueue",
 			gomega.Expect(worker2.client.List(worker2.ctx, workloads, client.InNamespace(raycluster.Namespace))).To(gomega.Succeed())
 			gomega.Expect(workloads.Items).To(gomega.BeEmpty())
 		})
+
+		/*
+			Bound-only Section.
+			Only MinReplicas changes; Replicas stays 1, so the effective count grows to 2 and a new slice is created.
+		*/
+		ginkgo.By("raise only MinReplicas of the RayCluster's first worker group to 2", func() {
+			gomega.Eventually(func(g gomega.Gomega) {
+				getRayCluster(manager.ctx, manager.client, raycluster)
+				raycluster.Spec.WorkerGroupSpecs[0].MinReplicas = new(int32(2))
+				g.Expect(manager.client.Update(manager.ctx, raycluster)).To(gomega.Succeed())
+			}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
+		})
+
+		ginkgo.By("observe: a new workload slice with the bounded count is created in the manager cluster")
+		boundWorkloadKey := getWorkloadKey(raycluster)
+		gomega.Eventually(func(g gomega.Gomega) {
+			wl := getWorkload(g, manager.ctx, manager.client, boundWorkloadKey)
+			g.Expect(wl.Spec.PodSets[1].Count).To(gomega.BeEquivalentTo(int32(2)))
+		}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
+
+		ginkgo.By("emulate the scheduler: copy clusterName from the previous slice to the new slice", func() {
+			oldWorkload := getWorkload(gomega.Default, manager.ctx, manager.client, newWorkloadKey)
+			gomega.Eventually(func(g gomega.Gomega) {
+				boundWorkload := getWorkload(g, manager.ctx, manager.client, boundWorkloadKey)
+				boundWorkload.Status.ClusterName = oldWorkload.Status.ClusterName
+				g.Expect(manager.client.Status().Update(manager.ctx, boundWorkload)).To(gomega.Succeed())
+			}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
+		})
+
+		ginkgo.By("emulate the scheduler: admit the new slice and finish the previous slice in the manager cluster", func() {
+			gomega.Eventually(func(g gomega.Gomega) {
+				oldWorkload := getWorkload(g, manager.ctx, manager.client, newWorkloadKey)
+				g.Expect(workloadfinish.Finish(manager.ctx, manager.client, oldWorkload, kueue.WorkloadSliceReplaced, "Replaced to accommodate a new slice", behavioral.RealClock)).To(gomega.Succeed())
+			}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
+			integration.SetQuotaReservation(manager.ctx, manager.client, boundWorkloadKey, admission(2).Obj())
+		})
+
+		ginkgo.By("emulate the scheduler: admit the new slice and finish the previous slice in the worker1 cluster", func() {
+			integration.SetQuotaReservation(worker1.ctx, worker1.client, boundWorkloadKey, admission(2).Obj())
+			gomega.Eventually(func(g gomega.Gomega) {
+				wl := getWorkload(g, worker1.ctx, worker1.client, newWorkloadKey)
+				g.Expect(workloadfinish.Finish(worker1.ctx, worker1.client, wl, kueue.WorkloadSliceReplaced, "Replaced to accommodate a new slice", behavioral.RealClock)).To(gomega.Succeed())
+			}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
+		})
+
+		ginkgo.By("observe: the raised MinReplicas is synced to the worker1 cluster", func() {
+			gomega.Eventually(func(g gomega.Gomega) {
+				remote := raycluster.DeepCopy()
+				getRayCluster(worker1.ctx, worker1.client, remote)
+				g.Expect(remote.Spec.WorkerGroupSpecs[0].Replicas).To(gomega.BeEquivalentTo(new(int32(1))))
+				g.Expect(remote.Spec.WorkerGroupSpecs[0].MinReplicas).To(gomega.BeEquivalentTo(new(int32(2))))
+			}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
+		})
 	})
 })
